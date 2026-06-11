@@ -28,9 +28,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import coil.compose.rememberAsyncImagePainter
-import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFprobeKit
-import com.arthenica.ffmpegkit.ReturnCode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -239,8 +236,8 @@ fun SettingsCard(settings: ClassicSettings, tab: MediaTab, onChange: (ClassicSet
                 NumericSliderSetting("Одновременных upscale-процессов", "Сколько кадров улучшать одновременно. 1 = как старый скрипт. 2–4 = быстрее на мощном устройстве.", settings.parallelJobs, 1f, 16f, 1f, "") { onChange(settings.copy(parallelJobs = it)) }
                 NumericSliderSetting("Выходной FPS", "0 = оставить FPS оригинала. Иначе simple/interpolate использует это значение.", settings.outputFps, 0f, 240f, 1f, " fps") { onChange(settings.copy(outputFps = it)) }
                 SegmentedSetting("Режим FPS", "keep = оставить; simple = ffmpeg -r; interpolate = ffmpeg minterpolate, медленно.", listOf("keep", "simple", "interpolate"), settings.fpsMode) { onChange(settings.copy(fpsMode = it)) }
-                NumericSliderSetting("CRF", "Качество libx264. Меньше = лучше и больше файл. Обычно 16–20.", settings.crf, 0f, 51f, 1f, "") { onChange(settings.copy(crf = it)) }
-                SegmentedSetting("Preset", "Скорость кодирования ffmpeg.", listOf("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"), settings.encoderPreset) { onChange(settings.copy(encoderPreset = it)) }
+                NumericSliderSetting("Качество видео", "Если доступен libx264 — используется как CRF. Если нет — автоматически переводится в q:v для mpeg4.", settings.crf, 0f, 51f, 1f, "") { onChange(settings.copy(crf = it)) }
+                SegmentedSetting("Preset", "Скорость кодирования, используется когда доступен libx264.", listOf("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"), settings.encoderPreset) { onChange(settings.copy(encoderPreset = it)) }
                 ToggleSetting("Удалять исходные PNG после upscale", "Экономит место, как в старом скрипте.", settings.deleteFrames) { onChange(settings.copy(deleteFrames = it)) }
                 ToggleSetting("Оставить рабочую папку", "Полезно для продолжения/отладки, но занимает много места.", settings.keepWork) { onChange(settings.copy(keepWork = it)) }
                 NumericSliderSetting("Пауза каждые N кадров", "0 = без пауз. Для охлаждения телефона.", settings.pauseEvery, 0f, 1000f, 10f, "") { onChange(settings.copy(pauseEvery = it)) }
@@ -349,11 +346,19 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
 
     withContext(Dispatchers.Main) { update("Копирование видео...", 0.02f) }
     val input = copyUriToCache(context, uri, "anime4k_video_input", ".mp4")
-    val originalFps = probeFps(input).ifBlank { "24000/1001" }
+    val originalFps = probeFps(context, input).ifBlank { "24000/1001" }
     val finalFps = if (settings.outputFps > 0f) formatNumber(settings.outputFps) else originalFps
 
     withContext(Dispatchers.Main) { update("Разбор видео на PNG-кадры...", 0.08f) }
-    runFfmpeg("-hide_banner -y -i ${q(input.absolutePath)} -vsync 0 ${q(File(frames, "%08d.png").absolutePath)}")
+    runFfmpeg(
+        context,
+        listOf(
+            "-hide_banner", "-y",
+            "-i", input.absolutePath,
+            "-vsync", "0",
+            File(frames, "%08d.png").absolutePath,
+        )
+    )
 
     val frameFiles = frames.listFiles { file -> file.extension.lowercase() == "png" }?.sortedBy { it.name }.orEmpty()
     if (frameFiles.isEmpty()) error("Не удалось извлечь кадры")
@@ -396,30 +401,105 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
 
     val output = File(context.cacheDir, "anime4k_video_${System.currentTimeMillis()}.mp4")
     withContext(Dispatchers.Main) { update("Сборка MP4...", 0.90f) }
-    val fpsArgs = when (settings.fpsMode) {
-        "simple" -> if (settings.outputFps > 0f) "-r $finalFps" else ""
-        "interpolate" -> if (settings.outputFps > 0f) "-vf minterpolate=fps=$finalFps:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1" else ""
-        else -> ""
+    val hasX264 = hasFfmpegEncoder(context, "libx264")
+    val command = mutableListOf(
+        "-hide_banner", "-y",
+        "-framerate", originalFps,
+        "-i", File(upscaled, "%08d.png").absolutePath,
+        "-i", input.absolutePath,
+        "-map", "0:v:0",
+        "-map", "1:a?",
+    )
+    if (settings.fpsMode == "simple" && settings.outputFps > 0f) {
+        command += listOf("-r", finalFps)
     }
-    runFfmpeg("-hide_banner -y -framerate $originalFps -i ${q(File(upscaled, "%08d.png").absolutePath)} -i ${q(input.absolutePath)} -map 0:v:0 -map 1:a? $fpsArgs -c:v libx264 -crf ${settings.crf.roundToInt()} -preset ${settings.encoderPreset} -pix_fmt yuv420p -c:a copy -shortest ${q(output.absolutePath)}")
+    if (settings.fpsMode == "interpolate" && settings.outputFps > 0f) {
+        command += listOf("-vf", "minterpolate=fps=$finalFps:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+    }
+    if (hasX264) {
+        command += listOf(
+            "-c:v", "libx264",
+            "-crf", settings.crf.roundToInt().toString(),
+            "-preset", settings.encoderPreset,
+        )
+    } else {
+        val qv = crfToMpeg4Quality(settings.crf)
+        command += listOf(
+            "-c:v", "mpeg4",
+            "-q:v", qv.toString(),
+        )
+    }
+    command += listOf(
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-shortest",
+        output.absolutePath,
+    )
+    runFfmpeg(context, command)
     if (!settings.keepWork) work.deleteRecursively()
     withContext(Dispatchers.Main) { update("Видео готово", 1f) }
     output
 }
 
-fun runFfmpeg(command: String) {
-    val session = FFmpegKit.execute(command)
-    if (!ReturnCode.isSuccess(session.returnCode)) {
-        error(session.failStackTrace ?: session.allLogsAsString ?: "FFmpeg error")
+fun ffmpegPath(context: Context): String {
+    return File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so").absolutePath
+}
+
+fun ffprobePath(context: Context): String {
+    return File(context.applicationInfo.nativeLibraryDir, "libffprobe.so").absolutePath
+}
+
+
+fun hasFfmpegEncoder(context: Context, encoder: String): Boolean {
+    return runCatching {
+        runProcess(listOf(ffmpegPath(context), "-hide_banner", "-encoders")).contains(encoder)
+    }.getOrDefault(false)
+}
+
+fun crfToMpeg4Quality(crf: Float): Int {
+    // MPEG-4 encoder uses q:v, where 1 is best and 31 is worst.
+    // Map common x264-like CRF values to a safe q:v fallback.
+    return when {
+        crf <= 12f -> 1
+        crf <= 18f -> 2
+        crf <= 23f -> 3
+        crf <= 28f -> 5
+        crf <= 35f -> 8
+        else -> 12
     }
 }
 
-fun probeFps(file: File): String {
-    val session = FFprobeKit.execute("-v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=nk=1:nw=1 ${q(file.absolutePath)}")
-    return session.output?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+fun runProcess(args: List<String>, workingDir: File? = null): String {
+    val process = ProcessBuilder(args)
+        .redirectErrorStream(true)
+        .apply { if (workingDir != null) directory(workingDir) }
+        .start()
+    val output = process.inputStream.bufferedReader().readText()
+    val code = process.waitFor()
+    if (code != 0) {
+        error(output.ifBlank { "Command failed with code $code" })
+    }
+    return output
 }
 
-fun q(path: String): String = "'" + path.replace("'", "'\\''") + "'"
+fun runFfmpeg(context: Context, args: List<String>) {
+    runProcess(listOf(ffmpegPath(context)) + args)
+}
+
+fun probeFps(context: Context, file: File): String {
+    val output = runProcess(
+        listOf(
+            ffprobePath(context),
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "default=nk=1:nw=1",
+            file.absolutePath,
+        )
+    )
+    return output.lineSequence().firstOrNull()?.trim().orEmpty()
+}
+
 
 fun formatNumber(value: Float): String {
     return if (value % 1f == 0f) value.roundToInt().toString() else String.format("%.2f", value)
