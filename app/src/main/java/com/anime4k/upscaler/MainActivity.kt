@@ -723,7 +723,9 @@ suspend fun runFfmpegWithProgress(
     val process = ProcessBuilder(processArgs).redirectErrorStream(true).start()
     var currentSizeBytes = 0L
     var speed = ""
-    process.inputStream.bufferedReader().forEachLine { line ->
+    val reader = process.inputStream.bufferedReader()
+    while (true) {
+        val line = reader.readLine() ?: break
         val parsed = parseFfmpegProgressLine(line, durationMs, outputFile, started, currentSizeBytes, speed)
         if (line.startsWith("total_size=")) currentSizeBytes = line.substringAfter("=").toLongOrNull() ?: currentSizeBytes
         if (line.startsWith("speed=")) speed = line.substringAfter("=").trim()
