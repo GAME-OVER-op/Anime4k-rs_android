@@ -5,19 +5,12 @@ object NativeBridge {
         System.loadLibrary("anime4k_android")
     }
 
-    external fun processImage(
+    external fun processClassicImage(
         inputPath: String,
         outputPath: String,
-        mode: String,
         scale: Double,
-        quality: String,
         iterations: Int,
         pcs: Double,
         pgs: Double,
-        denoise: String,
-        deblur: String,
-        lineDarken: Double,
-        lineThin: Double,
-        clampHighlights: Boolean,
     ): String
 }
