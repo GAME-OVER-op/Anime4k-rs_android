@@ -77,6 +77,14 @@ enum class AppScreen(val label: String) {
     Settings("Настройки"),
 }
 
+data class FfmpegProgress(
+    val percent: Float,
+    val currentSizeBytes: Long,
+    val estimatedSizeBytes: Long,
+    val etaSeconds: Long?,
+    val speed: String,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Anime4KApp() {
@@ -331,8 +339,23 @@ fun HeroCard(isVideo: Boolean, processing: Boolean, status: String, progress: Fl
                 FilledTonalButton(onClick = onRun, enabled = inputUri != null && !processing) { Text(if (processing) "Работает" else "Запустить") }
             }
             if (processing || progress > 0f) LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-            AssistChip(onClick = {}, label = { Text(status) })
+            ProgressStatusCard(status)
         }
+    }
+}
+
+@Composable
+fun ProgressStatusCard(status: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Text(
+            text = status,
+            modifier = Modifier.padding(14.dp).fillMaxWidth(),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -569,10 +592,20 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
     withContext(Dispatchers.Main) { update("Копирование видео...", 0.02f) }
     val input = copyUriToCache(context, uri, "anime4k_video_input", ".mp4")
     val originalFps = probeFps(context, input).ifBlank { "24000/1001" }
+    val durationMs = probeDurationMs(context, input).coerceAtLeast(1L)
     val finalFps = if (settings.outputFps > 0f) formatNumber(settings.outputFps) else originalFps
 
-    withContext(Dispatchers.Main) { update("Разбор видео на PNG-кадры...", 0.08f) }
-    runFfmpeg(context, listOf("-hide_banner", "-y", "-i", input.absolutePath, "-vsync", "0", File(frames, "%08d.png").absolutePath))
+    withContext(Dispatchers.Main) { update("Этап 1/4: разбор видео на PNG-кадры...\nДлительность: ${formatDuration(durationMs / 1000)}", 0.08f) }
+    runFfmpegWithProgress(
+        context = context,
+        args = listOf("-hide_banner", "-y", "-i", input.absolutePath, "-vsync", "0", File(frames, "%08d.png").absolutePath),
+        durationMs = durationMs,
+        outputFile = null,
+        baseProgress = 0.08f,
+        progressSpan = 0.10f,
+        stage = "Этап 1/4: разбор кадров",
+        update = update,
+    )
 
     val frameFiles = frames.listFiles { file -> file.extension.lowercase() == "png" }?.sortedBy { it.name }.orEmpty()
     if (frameFiles.isEmpty()) error("Не удалось извлечь кадры")
@@ -584,7 +617,9 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
     val pauseEvery = settings.pauseEvery.roundToInt()
     val pauseMs = (settings.pauseSeconds * 1000).roundToInt().coerceAtLeast(0).toLong()
 
-    withContext(Dispatchers.Main) { update("Anime4K обработка кадров: 0 / $total", 0.12f) }
+    val animeStarted = System.currentTimeMillis()
+    var lastUpscaledBytes = 0L
+    withContext(Dispatchers.Main) { update("Этап 2/4: Anime4K обработка кадров\nКадры: 0 / $total\nОсталось: считаю...", 0.18f) }
     coroutineScope {
         frameFiles.map { frame ->
             async(Dispatchers.IO) {
@@ -598,8 +633,19 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
                     val current = synchronized(work) { done += 1; done }
                     if (pauseEvery > 0 && current % pauseEvery == 0 && pauseMs > 0) Thread.sleep(pauseMs)
                     withContext(Dispatchers.Main) {
-                        val p = 0.12f + (current.toFloat() / total.toFloat()) * 0.72f
-                        update("Anime4K обработка кадров: $current / $total", p)
+                        val p = 0.18f + (current.toFloat() / total.toFloat()) * 0.62f
+                        val elapsedSec = ((System.currentTimeMillis() - animeStarted).coerceAtLeast(1L) / 1000.0)
+                        val fps = current / elapsedSec
+                        val etaSec = if (fps > 0.0) ((total - current) / fps).toLong() else null
+                        if (current == total || current % 10 == 0) lastUpscaledBytes = directorySize(upscaled)
+                        update(
+                            "Этап 2/4: Anime4K обработка кадров\n" +
+                                "Кадры: $current / $total (${String.format("%.1f", current * 100.0 / total)}%)\n" +
+                                "Скорость: ${String.format("%.2f", fps)} кадр/сек\n" +
+                                "Готовые кадры: ${formatBytes(lastUpscaledBytes)}\n" +
+                                "Осталось: ${formatEta(etaSec)}",
+                            p,
+                        )
                     }
                 }
             }
@@ -607,14 +653,24 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
     }
 
     val output = File(resultsDir(context), "anime4k_video_${System.currentTimeMillis()}.mp4")
-    withContext(Dispatchers.Main) { update("Сборка MP4...", 0.90f) }
+    val upscaledBytes = directorySize(upscaled)
+    withContext(Dispatchers.Main) { update("Этап 3/4: подготовка сборки MP4\nГотовые кадры: ${formatBytes(upscaledBytes)}", 0.82f) }
     val hasX264 = hasFfmpegEncoder(context, "libx264")
     val command = mutableListOf("-hide_banner", "-y", "-framerate", originalFps, "-i", File(upscaled, "%08d.png").absolutePath, "-i", input.absolutePath, "-map", "0:v:0", "-map", "1:a?")
     if (settings.fpsMode == "simple" && settings.outputFps > 0f) command += listOf("-r", finalFps)
     if (settings.fpsMode == "interpolate" && settings.outputFps > 0f) command += listOf("-vf", "minterpolate=fps=$finalFps:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
     command += if (hasX264) listOf("-c:v", "libx264", "-crf", settings.crf.roundToInt().toString(), "-preset", settings.encoderPreset) else listOf("-c:v", "mpeg4", "-q:v", crfToMpeg4Quality(settings.crf).toString())
     command += listOf("-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", output.absolutePath)
-    runFfmpeg(context, command)
+    runFfmpegWithProgress(
+        context = context,
+        args = command,
+        durationMs = durationMs,
+        outputFile = output,
+        baseProgress = 0.82f,
+        progressSpan = 0.16f,
+        stage = "Этап 4/4: сборка MP4",
+        update = update,
+    )
     if (!settings.keepWork) work.deleteRecursively()
     withContext(Dispatchers.Main) { update("Видео готово", 1f) }
     output
@@ -652,9 +708,69 @@ fun runProcess(args: List<String>, workingDir: File? = null): String {
 
 fun runFfmpeg(context: Context, args: List<String>) { runProcess(listOf(ffmpegPath(context)) + args) }
 
+suspend fun runFfmpegWithProgress(
+    context: Context,
+    args: List<String>,
+    durationMs: Long,
+    outputFile: File?,
+    baseProgress: Float,
+    progressSpan: Float,
+    stage: String,
+    update: (String, Float) -> Unit,
+) = withContext(Dispatchers.IO) {
+    val started = System.currentTimeMillis()
+    val processArgs = listOf(ffmpegPath(context), "-progress", "pipe:1", "-nostats") + args
+    val process = ProcessBuilder(processArgs).redirectErrorStream(true).start()
+    var currentSizeBytes = 0L
+    var speed = ""
+    process.inputStream.bufferedReader().forEachLine { line ->
+        val parsed = parseFfmpegProgressLine(line, durationMs, outputFile, started, currentSizeBytes, speed)
+        if (line.startsWith("total_size=")) currentSizeBytes = line.substringAfter("=").toLongOrNull() ?: currentSizeBytes
+        if (line.startsWith("speed=")) speed = line.substringAfter("=").trim()
+        if (parsed != null) {
+            currentSizeBytes = parsed.currentSizeBytes
+            speed = parsed.speed.ifBlank { speed }
+            val totalText = if (parsed.estimatedSizeBytes > 0L) " / Примерный итог: ~${formatBytes(parsed.estimatedSizeBytes)}" else ""
+            val text = stage + "\n" +
+                "Готово: ${String.format("%.1f", parsed.percent * 100.0)}%\n" +
+                "Файл: ${formatBytes(parsed.currentSizeBytes)}$totalText\n" +
+                "Скорость: ${parsed.speed.ifBlank { "—" }}\n" +
+                "Осталось: ${formatEta(parsed.etaSeconds)}"
+            withContext(Dispatchers.Main) { update(text, baseProgress + parsed.percent * progressSpan) }
+        }
+    }
+    val code = process.waitFor()
+    if (code != 0) error("FFmpeg завершился с кодом $code")
+}
+
+fun parseFfmpegProgressLine(
+    line: String,
+    durationMs: Long,
+    outputFile: File?,
+    started: Long,
+    previousSizeBytes: Long,
+    previousSpeed: String,
+): FfmpegProgress? {
+    if (!line.startsWith("out_time_ms=") && !line.startsWith("out_time_us=")) return null
+    val timeValue = line.substringAfter("=").toLongOrNull() ?: return null
+    val currentMs = timeValue / 1000L
+    val percent = (currentMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+    val currentSize = outputFile?.takeIf { it.exists() }?.length()?.takeIf { it > 0L } ?: previousSizeBytes
+    val estimated = if (percent > 0.05f && currentSize > 0L) (currentSize / percent).toLong() else 0L
+    val elapsedSec = ((System.currentTimeMillis() - started).coerceAtLeast(1L) / 1000.0)
+    val eta = if (percent > 0.02f) ((elapsedSec * (1.0 - percent) / percent)).toLong() else null
+    return FfmpegProgress(percent, currentSize, estimated, eta, previousSpeed)
+}
+
 fun probeFps(context: Context, file: File): String {
     val output = runProcess(listOf(ffprobePath(context), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "default=nk=1:nw=1", file.absolutePath))
     return output.lineSequence().firstOrNull()?.trim().orEmpty()
+}
+
+fun probeDurationMs(context: Context, file: File): Long {
+    val output = runProcess(listOf(ffprobePath(context), "-v", "error", "-show_entries", "format=duration", "-of", "default=nk=1:nw=1", file.absolutePath))
+    val seconds = output.lineSequence().firstOrNull()?.trim()?.toDoubleOrNull() ?: 0.0
+    return (seconds * 1000.0).toLong()
 }
 
 fun formatNumber(value: Float): String = if (value % 1f == 0f) value.roundToInt().toString() else String.format("%.2f", value)
@@ -662,6 +778,21 @@ fun formatNumber(value: Float): String = if (value % 1f == 0f) value.roundToInt(
 fun formatBytes(bytes: Long): String {
     val mb = bytes / 1024.0 / 1024.0
     return if (mb >= 1024) String.format("%.2f ГБ", mb / 1024.0) else String.format("%.1f МБ", mb)
+}
+
+fun formatEta(seconds: Long?): String {
+    if (seconds == null || seconds < 0) return "считаю..."
+    val h = seconds / 3600
+    val m = (seconds % 3600) / 60
+    val s = seconds % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+}
+
+fun formatDuration(seconds: Long): String = formatEta(seconds)
+
+fun directorySize(dir: File): Long {
+    if (!dir.exists()) return 0L
+    return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 }
 
 fun copyUriToCache(context: Context, uri: Uri, prefix: String, suffix: String): File {
