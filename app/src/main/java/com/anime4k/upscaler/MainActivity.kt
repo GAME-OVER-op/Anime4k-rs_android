@@ -1,9 +1,11 @@
 package com.anime4k.upscaler
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
@@ -12,6 +14,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -20,6 +24,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -63,29 +68,57 @@ data class ClassicSettings(
     val pauseSeconds: Float = 10f,
 )
 
-enum class MediaTab { Photo, Video }
+enum class AppScreen(val label: String) {
+    Photo("Фото"),
+    Video("Видео"),
+    Saved("Сохранённые"),
+    Settings("Настройки"),
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Anime4KApp() {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("anime4k_settings", Context.MODE_PRIVATE) }
+    var showSliders by remember { mutableStateOf(prefs.getBoolean("show_sliders", true)) }
+    var keepScreenOn by remember { mutableStateOf(prefs.getBoolean("keep_screen_on", true)) }
+
     MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = Color(0xFF8B5CF6),
-            secondary = Color(0xFF22D3EE),
-            background = Color(0xFF0F172A),
-            surface = Color(0xFF111827),
-        )
+        colorScheme = lightColorScheme(
+            primary = Color(0xFF1A73E8),
+            onPrimary = Color.White,
+            secondary = Color(0xFF34A853),
+            background = Color(0xFFF8FAFD),
+            surface = Color.White,
+            surfaceVariant = Color(0xFFE8F0FE),
+            onSurface = Color(0xFF202124),
+            onSurfaceVariant = Color(0xFF5F6368),
+        ),
+        shapes = Shapes(
+            extraSmall = RoundedCornerShape(8.dp),
+            small = RoundedCornerShape(12.dp),
+            medium = RoundedCornerShape(20.dp),
+            large = RoundedCornerShape(28.dp),
+            extraLarge = RoundedCornerShape(32.dp),
+        ),
     ) {
-        val context = LocalContext.current
         val scope = rememberCoroutineScope()
-        var tab by remember { mutableStateOf(MediaTab.Photo) }
+        var screen by remember { mutableStateOf(AppScreen.Photo) }
         var settings by remember { mutableStateOf(ClassicSettings()) }
         var inputUri by remember { mutableStateOf<Uri?>(null) }
         var outputFile by remember { mutableStateOf<File?>(null) }
         var outputIsVideo by remember { mutableStateOf(false) }
-        var status by remember { mutableStateOf("Выберите фото или видео") }
+        var status by remember { mutableStateOf("Выберите файл для апскейла") }
         var progress by remember { mutableStateOf(0f) }
         var processing by remember { mutableStateOf(false) }
+        var savedFiles by remember { mutableStateOf(listSavedResults(context)) }
+
+        val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+        LaunchedEffect(Unit) {
+            if (Build.VERSION.SDK_INT >= 33) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
 
         val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             inputUri = uri
@@ -102,80 +135,212 @@ fun Anime4KApp() {
             progress = 0f
         }
 
-        Scaffold(topBar = { TopAppBar(title = { Text("Anime4K Апскейлер") }) }) { padding ->
-            Column(
-                modifier = Modifier
-                    .padding(padding)
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                Text(
-                    "Классический Anime4K-rs: те же реальные параметры, что были в рабочем скрипте — scale, iterations, pgs, pcs, FPS, CRF, preset и параллельная обработка кадров.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color(0xFFD1D5DB),
+        Scaffold(
+            topBar = {
+                CenterAlignedTopAppBar(
+                    title = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Anime4K", fontWeight = FontWeight.Bold)
+                            Text("Classic Rust Upscaler", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
                 )
-
-                TabRow(selectedTabIndex = if (tab == MediaTab.Photo) 0 else 1) {
-                    Tab(selected = tab == MediaTab.Photo, onClick = { tab = MediaTab.Photo }, text = { Text("Фото") })
-                    Tab(selected = tab == MediaTab.Video, onClick = { tab = MediaTab.Video }, text = { Text("Видео") })
+            },
+            bottomBar = {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                    AppScreen.entries.forEach { item ->
+                        NavigationBarItem(
+                            selected = screen == item,
+                            onClick = {
+                                screen = item
+                                if (item == AppScreen.Saved) savedFiles = listSavedResults(context)
+                            },
+                            icon = { Text(screenIcon(item), style = MaterialTheme.typography.titleMedium) },
+                            label = { Text(item.label) },
+                        )
+                    }
                 }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = {
-                        outputFile = null
-                        if (tab == MediaTab.Photo) photoPicker.launch("image/*") else videoPicker.launch("video/*")
-                    }) { Text(if (tab == MediaTab.Photo) "Выбрать фото" else "Выбрать видео") }
-
-                    Button(
-                        enabled = inputUri != null && !processing,
-                        onClick = {
-                            val uri = inputUri ?: return@Button
+            },
+        ) { padding ->
+            Box(Modifier.padding(padding).fillMaxSize()) {
+                when (screen) {
+                    AppScreen.Photo -> ProcessingScreen(
+                        isVideo = false,
+                        settings = settings,
+                        showSliders = showSliders,
+                        inputUri = inputUri,
+                        outputFile = outputFile,
+                        outputIsVideo = outputIsVideo,
+                        status = status,
+                        progress = progress,
+                        processing = processing,
+                        onPick = { photoPicker.launch("image/*") },
+                        onRun = {
+                            val uri = inputUri ?: return@ProcessingScreen
                             scope.launch {
                                 processing = true
                                 progress = 0f
                                 outputFile = null
+                                if (keepScreenOn) startProcessingForeground(context, "Подготовка фото")
                                 try {
-                                    val file = if (tab == MediaTab.Photo) {
-                                        outputIsVideo = false
-                                        processPhoto(context, uri, settings) { text, p -> status = text; progress = p }
-                                    } else {
-                                        outputIsVideo = true
-                                        processVideo(context, uri, settings) { text, p -> status = text; progress = p }
+                                    val file = processPhoto(context, uri, settings) { text, p ->
+                                        status = text
+                                        progress = p
+                                        if (keepScreenOn) updateProcessingNotification(context, text, p)
                                     }
                                     outputFile = file
+                                    outputIsVideo = false
+                                    savedFiles = listSavedResults(context)
                                     status = "Готово: ${file.name}"
                                     progress = 1f
                                 } catch (e: Throwable) {
                                     status = "Ошибка: ${e.message}"
                                 } finally {
+                                    if (keepScreenOn) stopProcessingForeground(context)
                                     processing = false
                                 }
                             }
-                        }
-                    ) { Text(if (processing) "Обработка..." else "Запустить") }
+                        },
+                        onSettings = { settings = it },
+                    )
+                    AppScreen.Video -> ProcessingScreen(
+                        isVideo = true,
+                        settings = settings,
+                        showSliders = showSliders,
+                        inputUri = inputUri,
+                        outputFile = outputFile,
+                        outputIsVideo = outputIsVideo,
+                        status = status,
+                        progress = progress,
+                        processing = processing,
+                        onPick = { videoPicker.launch("video/*") },
+                        onRun = {
+                            val uri = inputUri ?: return@ProcessingScreen
+                            scope.launch {
+                                processing = true
+                                progress = 0f
+                                outputFile = null
+                                if (keepScreenOn) startProcessingForeground(context, "Подготовка видео")
+                                try {
+                                    val file = processVideo(context, uri, settings) { text, p ->
+                                        status = text
+                                        progress = p
+                                        if (keepScreenOn) updateProcessingNotification(context, text, p)
+                                    }
+                                    outputFile = file
+                                    outputIsVideo = true
+                                    savedFiles = listSavedResults(context)
+                                    status = "Готово: ${file.name}"
+                                    progress = 1f
+                                } catch (e: Throwable) {
+                                    status = "Ошибка: ${e.message}"
+                                } finally {
+                                    if (keepScreenOn) stopProcessingForeground(context)
+                                    processing = false
+                                }
+                            }
+                        },
+                        onSettings = { settings = it },
+                    )
+                    AppScreen.Saved -> SavedScreen(
+                        files = savedFiles,
+                        onRefresh = { savedFiles = listSavedResults(context) },
+                        onDelete = { file ->
+                            file.delete()
+                            savedFiles = listSavedResults(context)
+                        },
+                    )
+                    AppScreen.Settings -> AppSettingsScreen(
+                        showSliders = showSliders,
+                        keepScreenOn = keepScreenOn,
+                        onShowSliders = {
+                            showSliders = it
+                            prefs.edit().putBoolean("show_sliders", it).apply()
+                        },
+                        onKeepScreenOn = {
+                            keepScreenOn = it
+                            prefs.edit().putBoolean("keep_screen_on", it).apply()
+                        },
+                        onRequestNotifications = {
+                            if (Build.VERSION.SDK_INT >= 33) notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        },
+                    )
                 }
-
-                if (processing || progress > 0f) {
-                    LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-                }
-                Text(status, color = Color(0xFFE5E7EB))
-
-                if (tab == MediaTab.Photo) {
-                    ImagePreview("Вход", inputUri)
-                    outputFile?.let { ImagePreview("Результат", Uri.fromFile(it)) }
-                } else {
-                    inputUri?.let { Text("Видео выбрано: $it", color = Color(0xFFD1D5DB), style = MaterialTheme.typography.bodySmall) }
-                    outputFile?.let { Text("Результат: ${it.absolutePath}", color = Color(0xFFD1D5DB), style = MaterialTheme.typography.bodySmall) }
-                }
-
-                outputFile?.let { file ->
-                    ResultActions(file, outputIsVideo)
-                }
-
-                SettingsCard(settings, tab) { settings = it }
             }
+        }
+    }
+}
+
+fun screenIcon(screen: AppScreen): String = when (screen) {
+    AppScreen.Photo -> "🖼️"
+    AppScreen.Video -> "🎬"
+    AppScreen.Saved -> "📁"
+    AppScreen.Settings -> "⚙️"
+}
+
+@Composable
+fun ProcessingScreen(
+    isVideo: Boolean,
+    settings: ClassicSettings,
+    showSliders: Boolean,
+    inputUri: Uri?,
+    outputFile: File?,
+    outputIsVideo: Boolean,
+    status: String,
+    progress: Float,
+    processing: Boolean,
+    onPick: () -> Unit,
+    onRun: () -> Unit,
+    onSettings: (ClassicSettings) -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item {
+            HeroCard(isVideo = isVideo, processing = processing, status = status, progress = progress, onPick = onPick, onRun = onRun, inputUri = inputUri)
+        }
+        if (!isVideo) {
+            item { ImagePreview("Вход", inputUri) }
+            outputFile?.let { item { ImagePreview("Результат", Uri.fromFile(it)) } }
+        } else {
+            item { VideoInfoCard(inputUri, outputFile) }
+        }
+        outputFile?.let { file ->
+            item { ResultActions(file, outputIsVideo, onDeleted = {}) }
+        }
+        item { SettingsCard(settings, isVideo, showSliders, onSettings) }
+    }
+}
+
+@Composable
+fun HeroCard(isVideo: Boolean, processing: Boolean, status: String, progress: Float, onPick: () -> Unit, onRun: () -> Unit, inputUri: Uri?) {
+    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(if (isVideo) "Улучшение видео" else "Улучшение фото", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                if (isVideo) "Видео разбирается на PNG-кадры, кадры улучшаются классическим Rust Anime4K-rs, затем собирается MP4."
+                else "Фото улучшается тем же классическим Rust Anime4K-rs ядром.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = onPick, enabled = !processing) { Text(if (isVideo) "Выбрать видео" else "Выбрать фото") }
+                FilledTonalButton(onClick = onRun, enabled = inputUri != null && !processing) { Text(if (processing) "Работает" else "Запустить") }
+            }
+            if (processing || progress > 0f) LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+            AssistChip(onClick = {}, label = { Text(status) })
+        }
+    }
+}
+
+@Composable
+fun VideoInfoCard(inputUri: Uri?, outputFile: File?) {
+    ElevatedCard {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Видео", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(inputUri?.toString() ?: "Видео не выбрано", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            outputFile?.let { Text("Результат: ${it.name}", color = MaterialTheme.colorScheme.primary) }
         }
     }
 }
@@ -183,13 +348,13 @@ fun Anime4KApp() {
 @Composable
 fun ImagePreview(title: String, uri: Uri?) {
     if (uri == null) return
-    Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF111827))) {
+    ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, fontWeight = FontWeight.Bold)
             Image(
                 painter = rememberAsyncImagePainter(uri),
                 contentDescription = title,
-                modifier = Modifier.fillMaxWidth().height(220.dp),
+                modifier = Modifier.fillMaxWidth().height(240.dp).clip(RoundedCornerShape(18.dp)),
                 contentScale = ContentScale.Fit,
             )
         }
@@ -197,79 +362,141 @@ fun ImagePreview(title: String, uri: Uri?) {
 }
 
 @Composable
-fun ResultActions(file: File, isVideo: Boolean) {
+fun ResultActions(file: File, isVideo: Boolean, onDeleted: () -> Unit) {
     val context = LocalContext.current
     var message by remember { mutableStateOf("") }
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Button(onClick = {
-            runCatching { saveToGallery(context, file, isVideo) }
-                .onSuccess { message = "Сохранено в галерею" }
-                .onFailure { message = "Ошибка сохранения: ${it.message}" }
-        }) { Text("Сохранить") }
-        OutlinedButton(onClick = {
-            runCatching { shareFile(context, file, isVideo) }
-                .onFailure { message = "Ошибка: ${it.message}" }
-        }) { Text("Поделиться") }
+    ElevatedCard {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(file.name, fontWeight = FontWeight.Bold)
+            Text(formatBytes(file.length()), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    runCatching { saveToGallery(context, file, isVideo) }
+                        .onSuccess { message = "Сохранено в галерею" }
+                        .onFailure { message = "Ошибка сохранения: ${it.message}" }
+                }) { Text("Сохранить") }
+                OutlinedButton(onClick = {
+                    runCatching { shareFile(context, file, isVideo) }
+                        .onFailure { message = "Ошибка: ${it.message}" }
+                }) { Text("Поделиться") }
+                OutlinedButton(onClick = {
+                    file.delete()
+                    message = "Удалено из памяти приложения"
+                    onDeleted()
+                }) { Text("Удалить") }
+            }
+            if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.primary)
+        }
     }
-    if (message.isNotBlank()) Text(message, color = Color(0xFFE5E7EB))
 }
 
 @Composable
-fun SettingsCard(settings: ClassicSettings, tab: MediaTab, onChange: (ClassicSettings) -> Unit) {
-    Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF111827))) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            Text("Настройки Anime4K-rs Classic", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(
-                "Здесь только реальные параметры старого Rust-ядра и старого video script. У чисел есть ползунок и ручной ввод без жёсткого ограничения.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF9CA3AF),
-            )
-
+fun SettingsCard(settings: ClassicSettings, isVideo: Boolean, showSliders: Boolean, onChange: (ClassicSettings) -> Unit) {
+    ElevatedCard {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            Text("Параметры Anime4K-rs", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             SectionTitle("Качество кадра")
-            NumericSliderSetting("Масштаб", "anime4k -s. Для 1080p→4K обычно 2. Можно ввести больше вручную.", settings.scale, 0.5f, 8f, 0.25f, "x") { onChange(settings.copy(scale = it)) }
-            NumericSliderSetting("Количество прогонов", "anime4k -i. В старом скрипте хорошее значение было 3.", settings.iterations, 1f, 20f, 1f, "") { onChange(settings.copy(iterations = it)) }
-            NumericSliderSetting("Push Gradient", "--pgs. Главная сила восстановления контуров. Обычно 1.", settings.pgs, 0f, 10f, 0.05f, "") { onChange(settings.copy(pgs = it)) }
-            NumericSliderSetting("Push Color", "--pcs. Подтягивание цвета. Обычно 0.", settings.pcs, 0f, 10f, 0.05f, "") { onChange(settings.copy(pcs = it)) }
-
-            if (tab == MediaTab.Video) {
+            NumericSetting("Масштаб", "anime4k -s", settings.scale, 0.5f, 8f, 0.25f, "x", showSliders) { onChange(settings.copy(scale = it)) }
+            NumericSetting("Прогоны", "anime4k -i", settings.iterations, 1f, 20f, 1f, "", showSliders) { onChange(settings.copy(iterations = it)) }
+            NumericSetting("Push Gradient", "--pgs", settings.pgs, 0f, 10f, 0.05f, "", showSliders) { onChange(settings.copy(pgs = it)) }
+            NumericSetting("Push Color", "--pcs", settings.pcs, 0f, 10f, 0.05f, "", showSliders) { onChange(settings.copy(pcs = it)) }
+            if (isVideo) {
                 SectionTitle("Видео")
-                NumericSliderSetting("Одновременных upscale-процессов", "Сколько кадров улучшать одновременно. 1 = как старый скрипт. 2–4 = быстрее на мощном устройстве.", settings.parallelJobs, 1f, 16f, 1f, "") { onChange(settings.copy(parallelJobs = it)) }
-                NumericSliderSetting("Выходной FPS", "0 = оставить FPS оригинала. Иначе simple/interpolate использует это значение.", settings.outputFps, 0f, 240f, 1f, " fps") { onChange(settings.copy(outputFps = it)) }
-                SegmentedSetting("Режим FPS", "keep = оставить; simple = ffmpeg -r; interpolate = ffmpeg minterpolate, медленно.", listOf("keep", "simple", "interpolate"), settings.fpsMode) { onChange(settings.copy(fpsMode = it)) }
-                NumericSliderSetting("Качество видео", "Если доступен libx264 — используется как CRF. Если нет — автоматически переводится в q:v для mpeg4.", settings.crf, 0f, 51f, 1f, "") { onChange(settings.copy(crf = it)) }
-                SegmentedSetting("Preset", "Скорость кодирования, используется когда доступен libx264.", listOf("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"), settings.encoderPreset) { onChange(settings.copy(encoderPreset = it)) }
-                ToggleSetting("Удалять исходные PNG после upscale", "Экономит место, как в старом скрипте.", settings.deleteFrames) { onChange(settings.copy(deleteFrames = it)) }
-                ToggleSetting("Оставить рабочую папку", "Полезно для продолжения/отладки, но занимает много места.", settings.keepWork) { onChange(settings.copy(keepWork = it)) }
-                NumericSliderSetting("Пауза каждые N кадров", "0 = без пауз. Для охлаждения телефона.", settings.pauseEvery, 0f, 1000f, 10f, "") { onChange(settings.copy(pauseEvery = it)) }
-                NumericSliderSetting("Длительность паузы", "Секунд ожидания при паузе.", settings.pauseSeconds, 0f, 300f, 1f, " сек") { onChange(settings.copy(pauseSeconds = it)) }
+                NumericSetting("Параллельные процессы", "Сколько кадров улучшать одновременно", settings.parallelJobs, 1f, 16f, 1f, "", showSliders) { onChange(settings.copy(parallelJobs = it)) }
+                NumericSetting("Выходной FPS", "0 = оригинальный FPS", settings.outputFps, 0f, 240f, 1f, " fps", showSliders) { onChange(settings.copy(outputFps = it)) }
+                SegmentedSetting("Режим FPS", listOf("keep", "simple", "interpolate"), settings.fpsMode) { onChange(settings.copy(fpsMode = it)) }
+                NumericSetting("Качество видео", "CRF для x264 или q:v fallback", settings.crf, 0f, 51f, 1f, "", showSliders) { onChange(settings.copy(crf = it)) }
+                SegmentedSetting("Preset", listOf("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"), settings.encoderPreset) { onChange(settings.copy(encoderPreset = it)) }
+                ToggleSetting("Удалять исходные PNG", "Экономит место", settings.deleteFrames) { onChange(settings.copy(deleteFrames = it)) }
+                ToggleSetting("Оставить рабочую папку", "Для отладки и продолжения", settings.keepWork) { onChange(settings.copy(keepWork = it)) }
+                NumericSetting("Пауза каждые N кадров", "0 = без пауз", settings.pauseEvery, 0f, 1000f, 10f, "", showSliders) { onChange(settings.copy(pauseEvery = it)) }
+                NumericSetting("Длительность паузы", "Секунды", settings.pauseSeconds, 0f, 300f, 1f, " сек", showSliders) { onChange(settings.copy(pauseSeconds = it)) }
             }
         }
     }
 }
 
 @Composable
-fun SectionTitle(title: String) {
-    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFFDDD6FE))
-}
-
-@Composable
-fun ToggleSetting(title: String, description: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(checked, onCheckedChange = onChecked)
-        Column {
-            Text(title)
-            Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9CA3AF))
+fun SavedScreen(files: List<File>, onRefresh: () -> Unit, onDelete: (File) -> Unit) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Сохранённые в приложении", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onRefresh) { Text("Обновить") }
+            }
+        }
+        if (files.isEmpty()) {
+            item { EmptyState("Пока нет результатов", "После обработки файлы будут появляться здесь. Их можно сохранить в галерею, удалить из памяти приложения или поделиться.") }
+        } else {
+            items(files, key = { it.absolutePath }) { file ->
+                val isVideo = file.extension.lowercase() == "mp4"
+                ResultActions(file, isVideo, onDeleted = { onDelete(file) })
+            }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SegmentedSetting(title: String, description: String, values: List<String>, selected: String, onSelect: (String) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+fun AppSettingsScreen(
+    showSliders: Boolean,
+    keepScreenOn: Boolean,
+    onShowSliders: (Boolean) -> Unit,
+    onKeepScreenOn: (Boolean) -> Unit,
+    onRequestNotifications: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Text("Настройки приложения", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        ElevatedCard {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ToggleSetting("Показывать ползунки", "Если выключить — останется точный ручной ввод чисел.", showSliders, onShowSliders)
+                ToggleSetting("Фоновая активность и уведомление", "Во время обработки включается foreground service и постоянное уведомление со статусом.", keepScreenOn, onKeepScreenOn)
+                Button(onClick = onRequestNotifications) { Text("Разрешить уведомления") }
+                Text("Для фоновой работы добавлен foreground service. Android всё равно может ограничивать долгие задачи, но уведомление показывает, что апскейл живой.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        EmptyState("Стиль Google / Material", "Интерфейс переведён на светлый Material 3: нижняя навигация, карточки, крупные действия и аккуратные поля ввода.")
+    }
+}
+
+@Composable
+fun EmptyState(title: String, description: String) {
+    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(title, fontWeight = FontWeight.Bold)
+            Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+fun SectionTitle(title: String) {
+    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+}
+
+@Composable
+fun ToggleSetting(title: String, description: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChecked)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun SegmentedSetting(title: String, values: List<String>, selected: String, onSelect: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(title, fontWeight = FontWeight.SemiBold)
-        Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9CA3AF))
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             values.forEach { value ->
                 FilterChip(selected = selected == value, onClick = { onSelect(value) }, label = { Text(value) })
             }
@@ -278,20 +505,14 @@ fun SegmentedSetting(title: String, description: String, values: List<String>, s
 }
 
 @Composable
-fun NumericSliderSetting(
-    title: String,
-    description: String,
-    value: Float,
-    min: Float,
-    max: Float,
-    step: Float,
-    suffix: String,
-    onValue: (Float) -> Unit,
-) {
+fun NumericSetting(title: String, description: String, value: Float, min: Float, max: Float, step: Float, suffix: String, showSlider: Boolean, onValue: (Float) -> Unit) {
     var text by remember(value) { mutableStateOf(formatNumber(value)) }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             OutlinedTextField(
                 value = text,
                 onValueChange = { raw ->
@@ -299,31 +520,30 @@ fun NumericSliderSetting(
                     text.toFloatOrNull()?.let { onValue(it) }
                 },
                 singleLine = true,
-                modifier = Modifier.width(116.dp),
+                modifier = Modifier.width(120.dp),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 suffix = { Text(suffix) },
             )
         }
-        Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9CA3AF))
-        Slider(
-            value = value.coerceIn(min, max),
-            onValueChange = { raw ->
-                val rounded = ((raw / step).roundToInt() * step).coerceIn(min, max)
-                onValue(rounded)
-                text = formatNumber(rounded)
-            },
-            valueRange = min..max,
-        )
-        if (value < min || value > max) {
-            Text("Экспертное значение вне диапазона ползунка: ${formatNumber(value)}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFFBBF24))
+        if (showSlider) {
+            Slider(
+                value = value.coerceIn(min, max),
+                onValueChange = { raw ->
+                    val rounded = ((raw / step).roundToInt() * step).coerceIn(min, max)
+                    onValue(rounded)
+                    text = formatNumber(rounded)
+                },
+                valueRange = min..max,
+            )
         }
+        if (value < min || value > max) Text("Экспертное значение: ${formatNumber(value)}", color = Color(0xFFF9AB00), style = MaterialTheme.typography.bodySmall)
     }
 }
 
 suspend fun processPhoto(context: Context, uri: Uri, settings: ClassicSettings, update: (String, Float) -> Unit): File = withContext(Dispatchers.IO) {
     withContext(Dispatchers.Main) { update("Подготовка фото...", 0.05f) }
     val input = copyUriToCache(context, uri, "anime4k_input", ".png")
-    val output = File(context.cacheDir, "anime4k_photo_${System.currentTimeMillis()}.png")
+    val output = File(resultsDir(context), "anime4k_photo_${System.currentTimeMillis()}.png")
     val response = NativeBridge.processClassicImage(
         input.absolutePath,
         output.absolutePath,
@@ -350,15 +570,7 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
     val finalFps = if (settings.outputFps > 0f) formatNumber(settings.outputFps) else originalFps
 
     withContext(Dispatchers.Main) { update("Разбор видео на PNG-кадры...", 0.08f) }
-    runFfmpeg(
-        context,
-        listOf(
-            "-hide_banner", "-y",
-            "-i", input.absolutePath,
-            "-vsync", "0",
-            File(frames, "%08d.png").absolutePath,
-        )
-    )
+    runFfmpeg(context, listOf("-hide_banner", "-y", "-i", input.absolutePath, "-vsync", "0", File(frames, "%08d.png").absolutePath))
 
     val frameFiles = frames.listFiles { file -> file.extension.lowercase() == "png" }?.sortedBy { it.name }.orEmpty()
     if (frameFiles.isEmpty()) error("Не удалось извлечь кадры")
@@ -372,19 +584,12 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
 
     withContext(Dispatchers.Main) { update("Anime4K обработка кадров: 0 / $total", 0.12f) }
     coroutineScope {
-        frameFiles.mapIndexed { index, frame ->
+        frameFiles.map { frame ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
                     val out = File(upscaled, frame.name)
                     if (!out.exists() || out.length() == 0L) {
-                        val response = NativeBridge.processClassicImage(
-                            frame.absolutePath,
-                            out.absolutePath,
-                            settings.scale.toDouble(),
-                            settings.iterations.roundToInt().coerceAtLeast(1),
-                            settings.pcs.toDouble(),
-                            settings.pgs.toDouble(),
-                        )
+                        val response = NativeBridge.processClassicImage(frame.absolutePath, out.absolutePath, settings.scale.toDouble(), settings.iterations.roundToInt().coerceAtLeast(1), settings.pcs.toDouble(), settings.pgs.toDouble())
                         if (!response.startsWith("OK:")) error(response.removePrefix("ERR:"))
                     }
                     if (settings.deleteFrames) frame.delete()
@@ -399,118 +604,68 @@ suspend fun processVideo(context: Context, uri: Uri, settings: ClassicSettings, 
         }.awaitAll()
     }
 
-    val output = File(context.cacheDir, "anime4k_video_${System.currentTimeMillis()}.mp4")
+    val output = File(resultsDir(context), "anime4k_video_${System.currentTimeMillis()}.mp4")
     withContext(Dispatchers.Main) { update("Сборка MP4...", 0.90f) }
     val hasX264 = hasFfmpegEncoder(context, "libx264")
-    val command = mutableListOf(
-        "-hide_banner", "-y",
-        "-framerate", originalFps,
-        "-i", File(upscaled, "%08d.png").absolutePath,
-        "-i", input.absolutePath,
-        "-map", "0:v:0",
-        "-map", "1:a?",
-    )
-    if (settings.fpsMode == "simple" && settings.outputFps > 0f) {
-        command += listOf("-r", finalFps)
-    }
-    if (settings.fpsMode == "interpolate" && settings.outputFps > 0f) {
-        command += listOf("-vf", "minterpolate=fps=$finalFps:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
-    }
-    if (hasX264) {
-        command += listOf(
-            "-c:v", "libx264",
-            "-crf", settings.crf.roundToInt().toString(),
-            "-preset", settings.encoderPreset,
-        )
-    } else {
-        val qv = crfToMpeg4Quality(settings.crf)
-        command += listOf(
-            "-c:v", "mpeg4",
-            "-q:v", qv.toString(),
-        )
-    }
-    command += listOf(
-        "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-shortest",
-        output.absolutePath,
-    )
+    val command = mutableListOf("-hide_banner", "-y", "-framerate", originalFps, "-i", File(upscaled, "%08d.png").absolutePath, "-i", input.absolutePath, "-map", "0:v:0", "-map", "1:a?")
+    if (settings.fpsMode == "simple" && settings.outputFps > 0f) command += listOf("-r", finalFps)
+    if (settings.fpsMode == "interpolate" && settings.outputFps > 0f) command += listOf("-vf", "minterpolate=fps=$finalFps:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+    command += if (hasX264) listOf("-c:v", "libx264", "-crf", settings.crf.roundToInt().toString(), "-preset", settings.encoderPreset) else listOf("-c:v", "mpeg4", "-q:v", crfToMpeg4Quality(settings.crf).toString())
+    command += listOf("-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", output.absolutePath)
     runFfmpeg(context, command)
     if (!settings.keepWork) work.deleteRecursively()
     withContext(Dispatchers.Main) { update("Видео готово", 1f) }
     output
 }
 
-fun ffmpegPath(context: Context): String {
-    return File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so").absolutePath
+fun resultsDir(context: Context): File = File(context.filesDir, "results").apply { mkdirs() }
+
+fun listSavedResults(context: Context): List<File> {
+    return resultsDir(context).listFiles { file -> file.isFile && file.length() > 0L && file.extension.lowercase() in setOf("png", "jpg", "jpeg", "mp4") }
+        ?.sortedByDescending { it.lastModified() }
+        .orEmpty()
 }
 
-fun ffprobePath(context: Context): String {
-    return File(context.applicationInfo.nativeLibraryDir, "libffprobe.so").absolutePath
-}
+fun ffmpegPath(context: Context): String = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so").absolutePath
+fun ffprobePath(context: Context): String = File(context.applicationInfo.nativeLibraryDir, "libffprobe.so").absolutePath
 
+fun hasFfmpegEncoder(context: Context, encoder: String): Boolean = runCatching { runProcess(listOf(ffmpegPath(context), "-hide_banner", "-encoders")).contains(encoder) }.getOrDefault(false)
 
-fun hasFfmpegEncoder(context: Context, encoder: String): Boolean {
-    return runCatching {
-        runProcess(listOf(ffmpegPath(context), "-hide_banner", "-encoders")).contains(encoder)
-    }.getOrDefault(false)
-}
-
-fun crfToMpeg4Quality(crf: Float): Int {
-    // MPEG-4 encoder uses q:v, where 1 is best and 31 is worst.
-    // Map common x264-like CRF values to a safe q:v fallback.
-    return when {
-        crf <= 12f -> 1
-        crf <= 18f -> 2
-        crf <= 23f -> 3
-        crf <= 28f -> 5
-        crf <= 35f -> 8
-        else -> 12
-    }
+fun crfToMpeg4Quality(crf: Float): Int = when {
+    crf <= 12f -> 1
+    crf <= 18f -> 2
+    crf <= 23f -> 3
+    crf <= 28f -> 5
+    crf <= 35f -> 8
+    else -> 12
 }
 
 fun runProcess(args: List<String>, workingDir: File? = null): String {
-    val process = ProcessBuilder(args)
-        .redirectErrorStream(true)
-        .apply { if (workingDir != null) directory(workingDir) }
-        .start()
+    val process = ProcessBuilder(args).redirectErrorStream(true).apply { if (workingDir != null) directory(workingDir) }.start()
     val output = process.inputStream.bufferedReader().readText()
     val code = process.waitFor()
-    if (code != 0) {
-        error(output.ifBlank { "Command failed with code $code" })
-    }
+    if (code != 0) error(output.ifBlank { "Command failed with code $code" })
     return output
 }
 
-fun runFfmpeg(context: Context, args: List<String>) {
-    runProcess(listOf(ffmpegPath(context)) + args)
-}
+fun runFfmpeg(context: Context, args: List<String>) { runProcess(listOf(ffmpegPath(context)) + args) }
 
 fun probeFps(context: Context, file: File): String {
-    val output = runProcess(
-        listOf(
-            ffprobePath(context),
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=r_frame_rate",
-            "-of", "default=nk=1:nw=1",
-            file.absolutePath,
-        )
-    )
+    val output = runProcess(listOf(ffprobePath(context), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "default=nk=1:nw=1", file.absolutePath))
     return output.lineSequence().firstOrNull()?.trim().orEmpty()
 }
 
+fun formatNumber(value: Float): String = if (value % 1f == 0f) value.roundToInt().toString() else String.format("%.2f", value)
 
-fun formatNumber(value: Float): String {
-    return if (value % 1f == 0f) value.roundToInt().toString() else String.format("%.2f", value)
+fun formatBytes(bytes: Long): String {
+    val mb = bytes / 1024.0 / 1024.0
+    return if (mb >= 1024) String.format("%.2f ГБ", mb / 1024.0) else String.format("%.1f МБ", mb)
 }
 
 fun copyUriToCache(context: Context, uri: Uri, prefix: String, suffix: String): File {
     val output = File(context.cacheDir, "${prefix}_${System.currentTimeMillis()}$suffix")
     context.contentResolver.openInputStream(uri).use { input ->
-        FileOutputStream(output).use { out ->
-            requireNotNull(input) { "Не удалось открыть файл" }.copyTo(out)
-        }
+        FileOutputStream(output).use { out -> requireNotNull(input) { "Не удалось открыть файл" }.copyTo(out) }
     }
     return output
 }
@@ -524,9 +679,7 @@ fun saveToGallery(context: Context, file: File, isVideo: Boolean): Uri {
         put(MediaStore.MediaColumns.RELATIVE_PATH, if (isVideo) "Movies/Anime4K" else "Pictures/Anime4K")
     }
     val uri = resolver.insert(collection, values) ?: error("Не удалось создать MediaStore URI")
-    resolver.openOutputStream(uri).use { out ->
-        file.inputStream().use { input -> requireNotNull(out).let { input.copyTo(it) } }
-    }
+    resolver.openOutputStream(uri).use { out -> file.inputStream().use { input -> requireNotNull(out).let { input.copyTo(it) } } }
     return uri
 }
 
