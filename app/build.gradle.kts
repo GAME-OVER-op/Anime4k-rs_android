@@ -72,7 +72,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("com.arthenica:ffmpeg-kit-full-gpl:6.0-2")
+    implementation("com.arthenica:ffmpeg-kit-full-gpl:6.0-2.LTS")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
