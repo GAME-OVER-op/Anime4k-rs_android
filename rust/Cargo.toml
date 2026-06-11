@@ -1,0 +1,12 @@
+[package]
+name = "anime4k_android"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "anime4k_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+image = "0.22.5"
+jni = "0.21"

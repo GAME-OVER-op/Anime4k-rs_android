@@ -1,0 +1,8 @@
+[target.aarch64-linux-android]
+ar = "llvm-ar"
+
+[target.armv7-linux-androideabi]
+ar = "llvm-ar"
+
+[target.x86_64-linux-android]
+ar = "llvm-ar"
