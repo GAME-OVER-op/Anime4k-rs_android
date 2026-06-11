@@ -19,6 +19,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import coil.compose.rememberAsyncImagePainter
 import kotlinx.coroutines.Dispatchers
@@ -36,17 +38,25 @@ class MainActivity : ComponentActivity() {
 }
 
 data class UpscaleSettings(
-    val mode: String = "a",
+    val mode: String = "legacy",
     val scale: Float = 2f,
     val quality: String = "balanced",
-    val iterations: Float = 1f,
+    val iterations: Float = 3f,
     val pcs: Float = 0f,
     val pgs: Float = 1f,
     val denoise: String = "off",
     val deblur: String = "off",
-    val lineDarken: Float = 0.15f,
+    val lineDarken: Float = 0f,
     val lineThin: Float = 0f,
     val clampHighlights: Boolean = false,
+    val parallelJobs: Float = 2f,
+    val outputFps: Float = 0f,
+    val fpsMode: String = "keep",
+    val crf: Float = 18f,
+    val encoderPreset: String = "veryfast",
+    val deleteFrames: Boolean = true,
+    val pauseEvery: Float = 0f,
+    val pauseSeconds: Float = 10f,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -166,37 +176,70 @@ fun ImagePreview(title: String, uri: Uri?) {
 @Composable
 fun SettingsCard(settings: UpscaleSettings, onChange: (UpscaleSettings) -> Unit) {
     Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF111827))) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Text("Настройки качества", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Ползунки теперь шире, а справа есть точный ввод числа. Если нужно значение больше диапазона ползунка — введи вручную.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF9CA3AF),
+            )
 
-            SegmentedSetting("Режим", "Выбор цепочки обработки под тип исходника.", listOf("legacy", "a", "b", "c", "aa", "bb", "ca"), settings.mode) { onChange(settings.copy(mode = it)) }
-            SliderSetting("Масштаб", "Во сколько раз увеличить картинку. Для 1080p → 4K обычно x2.", settings.scale, 1f, 4f, 0.5f) { onChange(settings.copy(scale = it)) }
-            SegmentedSetting("Качество", "Баланс скорости и силы обработки.", listOf("fast", "balanced", "high", "ultra"), settings.quality) { onChange(settings.copy(quality = it)) }
-            SliderSetting("Итерации", "Повторение восстановления линий. Больше — сильнее эффект, но медленнее.", settings.iterations, 1f, 4f, 1f) { onChange(settings.copy(iterations = it)) }
-            SliderSetting("Push Gradient", "Главная сила восстановления контуров и линий.", settings.pgs, 0f, 2f, 0.05f) { onChange(settings.copy(pgs = it)) }
-            SliderSetting("Push Color", "Подтягивает цветовые области. Обычно 0–0.4, слишком много может мылить.", settings.pcs, 0f, 1f, 0.05f) { onChange(settings.copy(pcs = it)) }
-            SegmentedSetting("Шумоподавление", "Для старого, сжатого или 480p/720p видео.", listOf("off", "low", "medium", "high"), settings.denoise) { onChange(settings.copy(denoise = it)) }
-            SegmentedSetting("Deblur", "Повышает резкость после шума/размытия. Сильный режим может давать ореолы.", listOf("off", "low", "medium", "high"), settings.deblur) { onChange(settings.copy(deblur = it)) }
-            SliderSetting("Затемнение линий", "Делает контуры глубже и визуально ближе к 4K-ремастеру.", settings.lineDarken, 0f, 1f, 0.05f) { onChange(settings.copy(lineDarken = it)) }
-            SliderSetting("Утончение линий", "Осветляет края толстых линий. Использовать аккуратно.", settings.lineThin, 0f, 1f, 0.05f) { onChange(settings.copy(lineThin = it)) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(settings.clampHighlights, onCheckedChange = { onChange(settings.copy(clampHighlights = it)) })
-                Column {
-                    Text("Защита светлых областей")
-                    Text("Снижает пересветы, ringing и выбросы после резкости.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9CA3AF))
-                }
-            }
+            SectionTitle("Основной алгоритм")
+            SegmentedSetting("Режим", "legacy = старый рабочий Anime4K-rs. Остальные режимы — экспериментальные пресеты ядра.", listOf("legacy", "a", "b", "c", "aa", "bb", "ca", "custom"), settings.mode) { onChange(settings.copy(mode = it)) }
+            NumericSliderSetting("Масштаб", "Во сколько раз увеличить. Нормально: 2 для 1080p→4K, 4 для слабого исходника. Можно ввести больше вручную.", settings.scale, 0.5f, 8f, 0.25f, "x") { onChange(settings.copy(scale = it)) }
+            SegmentedSetting("Качество", "Для legacy почти не влияет; для экспериментальных режимов задаёт силу обработки.", listOf("fast", "balanced", "high", "ultra"), settings.quality) { onChange(settings.copy(quality = it)) }
+            NumericSliderSetting("Итерации", "Количество прогонов старого Anime4K. В старом скрипте хорошее значение было 3. Большие числа сильно замедляют.", settings.iterations, 1f, 20f, 1f, "") { onChange(settings.copy(iterations = it)) }
+            NumericSliderSetting("Push Gradient", "Главная сила контуров. Обычно 1.0. Можно пробовать 1.2–2.0, выше — экспериментально.", settings.pgs, 0f, 10f, 0.05f, "") { onChange(settings.copy(pgs = it)) }
+            NumericSliderSetting("Push Color", "Подтягивание цвета. Обычно 0.0. Можно пробовать 0.1–1.0, выше — экспериментально.", settings.pcs, 0f, 10f, 0.05f, "") { onChange(settings.copy(pcs = it)) }
+
+            SectionTitle("Дополнительная обработка")
+            SegmentedSetting("Шумоподавление", "Для старого, сжатого или 480p/720p видео. В legacy можно оставить off.", listOf("off", "low", "medium", "high"), settings.denoise) { onChange(settings.copy(denoise = it)) }
+            SegmentedSetting("Deblur", "Повышает резкость. Сильный режим может давать ореолы.", listOf("off", "low", "medium", "high"), settings.deblur) { onChange(settings.copy(deblur = it)) }
+            NumericSliderSetting("Затемнение линий", "Глубина контуров. Для classic/legacy обычно 0, чтобы не менять старое качество.", settings.lineDarken, 0f, 3f, 0.05f, "") { onChange(settings.copy(lineDarken = it)) }
+            NumericSliderSetting("Утончение линий", "Осветляет края толстых линий. Лучше использовать осторожно.", settings.lineThin, 0f, 3f, 0.05f, "") { onChange(settings.copy(lineThin = it)) }
+            ToggleSetting("Защита светлых областей", "Снижает пересветы, ringing и выбросы после резкости.", settings.clampHighlights) { onChange(settings.copy(clampHighlights = it)) }
+
+            SectionTitle("Видео и производительность")
+            Text(
+                "Эти параметры нужны для следующего видео-экрана и повторяют старый anime4k_video.sh. Оперативный RAM-буфер не добавляю — оставляем файловый pipeline.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF9CA3AF),
+            )
+            NumericSliderSetting("Одновременных upscale-процессов", "Параллельная обработка кадров. 1 = старое поведение, 2–4 = быстрый режим для мощного телефона. Можно ввести больше вручную.", settings.parallelJobs, 1f, 16f, 1f, "") { onChange(settings.copy(parallelJobs = it)) }
+            NumericSliderSetting("Выходной FPS", "0 = оставить оригинальный FPS. Можно ввести 24, 30, 60, 120 и любые другие числа.", settings.outputFps, 0f, 240f, 1f, " fps") { onChange(settings.copy(outputFps = it)) }
+            SegmentedSetting("Режим FPS", "keep = не менять; simple = ffmpeg -r; interpolate = minterpolate, медленно, но плавнее.", listOf("keep", "simple", "interpolate"), settings.fpsMode) { onChange(settings.copy(fpsMode = it)) }
+            NumericSliderSetting("CRF", "Качество кодирования H.264/H.265. Меньше = лучше и больше файл. Обычно 16–20.", settings.crf, 0f, 51f, 1f, "") { onChange(settings.copy(crf = it)) }
+            SegmentedSetting("Preset кодека", "Скорость кодирования ffmpeg. Медленнее = обычно меньше файл при том же CRF.", listOf("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"), settings.encoderPreset) { onChange(settings.copy(encoderPreset = it)) }
+            ToggleSetting("Удалять исходные PNG после upscale", "Экономит место, как в старом скрипте.", settings.deleteFrames) { onChange(settings.copy(deleteFrames = it)) }
+            NumericSliderSetting("Пауза каждые N кадров", "0 = без пауз. Полезно для охлаждения телефона.", settings.pauseEvery, 0f, 1000f, 10f, "") { onChange(settings.copy(pauseEvery = it)) }
+            NumericSliderSetting("Длительность паузы", "Сколько секунд ждать для охлаждения.", settings.pauseSeconds, 0f, 300f, 1f, " сек") { onChange(settings.copy(pauseSeconds = it)) }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SectionTitle(title: String) {
+    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFFDDD6FE))
+}
+
+@Composable
+fun ToggleSetting(title: String, description: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked, onCheckedChange = onChecked)
+        Column {
+            Text(title)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9CA3AF))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SegmentedSetting(title: String, description: String, values: List<String>, selected: String, onSelect: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title, fontWeight = FontWeight.SemiBold)
         Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9CA3AF))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             values.forEach { value ->
                 FilterChip(selected = selected == value, onClick = { onSelect(value) }, label = { Text(value) })
             }
@@ -205,19 +248,51 @@ fun SegmentedSetting(title: String, description: String, values: List<String>, s
 }
 
 @Composable
-fun SliderSetting(title: String, description: String, value: Float, min: Float, max: Float, step: Float, onValue: (Float) -> Unit) {
+fun NumericSliderSetting(
+    title: String,
+    description: String,
+    value: Float,
+    min: Float,
+    max: Float,
+    step: Float,
+    suffix: String,
+    onValue: (Float) -> Unit,
+) {
+    var text by remember(value) { mutableStateOf(formatNumber(value)) }
+
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(title, fontWeight = FontWeight.SemiBold)
-            Text(String.format("%.2f", value), color = Color(0xFF22D3EE))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            OutlinedTextField(
+                value = text,
+                onValueChange = { raw ->
+                    text = raw.replace(',', '.')
+                    text.toFloatOrNull()?.let { onValue(it) }
+                },
+                singleLine = true,
+                modifier = Modifier.width(116.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                suffix = { Text(suffix) },
+            )
         }
         Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9CA3AF))
         Slider(
-            value = value,
-            onValueChange = { raw -> onValue(((raw / step).roundToInt() * step).coerceIn(min, max)) },
+            value = value.coerceIn(min, max),
+            onValueChange = { raw ->
+                val rounded = ((raw / step).roundToInt() * step).coerceIn(min, max)
+                onValue(rounded)
+                text = formatNumber(rounded)
+            },
             valueRange = min..max,
         )
+        if (value < min || value > max) {
+            Text("Введено Экспертное значение вне диапазона ползунка: ${formatNumber(value)}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFFBBF24))
+        }
     }
+}
+
+fun formatNumber(value: Float): String {
+    return if (value % 1f == 0f) value.roundToInt().toString() else String.format("%.2f", value)
 }
 
 fun copyUriToCache(context: android.content.Context, uri: Uri): File {
